@@ -1,19 +1,18 @@
 from collections import defaultdict
 from collections.abc import Iterable
 from copy import deepcopy
-from typing import Any, Dict, Optional, Tuple, Type
+from typing import Any, Dict, List, Optional, Tuple, Type, Union
 from enum import Enum
-from typing import Union, List
 from warnings import warn
 
-from sqlalchemy.orm import Query
-from sqlalchemy.sql.selectable import Select
-from sqlalchemy.sql.elements import BinaryExpression
-from fastapi import Depends
+from fastapi import Depends, Query
 from fastapi.exceptions import RequestValidationError
-from pydantic import BaseModel, Extra, ValidationError, create_model, fields as py_fields, validator
+from pydantic import BaseModel, Extra, ValidationError, create_model, fields as py_field, validator, Field
 from pydantic.fields import FieldInfo
 from sqlalchemy import or_
+import sqlalchemy.orm as orm
+from sqlalchemy.sql.selectable import Select
+from sqlalchemy.sql.elements import BinaryExpression
 
 
 def _backward_compatible_value_for_like_and_ilike(value: str):
@@ -57,35 +56,12 @@ class Filter(BaseModel, extra=Extra.forbid):
         asc = "asc"
         desc = "desc"
 
-    class Constants:
+    class Constants:  # pragma: no cover
         model: Type
         ordering_field_name: str = "order_by"
         search_model_fields: List[str]
         search_field_name: str = "search"
         prefix: Optional[str] = None
-
-    def filter(self, query: Union[Query, Select], search_filters: List[BinaryExpression], search_value: str):
-        for field_name, value in self.filtering_fields:
-            field_value = getattr(self, field_name)
-            if isinstance(field_value, Filter):
-                query = field_value.filter(query, search_filters, search_value)
-            else:
-                if "__" in field_name:
-                    field_name, operator = field_name.split("__")
-                    operator, value = _orm_operator_transformer[operator](value)
-                else:
-                    operator = "__eq__"
-
-                model_field = getattr(self.Constants.model, field_name)
-                query = query.filter(getattr(model_field, operator)(value))
-
-        if hasattr(self.Constants, "search_model_fields") and search_value is not None:
-            search_filters.extend([
-                getattr(self.Constants.model, field).ilike(f"%{search_value}%")
-                for field in self.Constants.search_model_fields
-            ])
-
-        return query
 
     @property
     def filtering_fields(self):
@@ -104,31 +80,6 @@ class Filter(BaseModel, extra=Extra.forbid):
                 fields.pop(i, None)
 
         return fields.items()
-
-    def sort(self, query: Union[Query, Select], ordering_fields: List[str]):
-        if len(ordering_fields) == 0:
-            return query
-
-        for field_full_name in ordering_fields:
-            prefix, field_name = Filter._split_prefix(field_full_name.replace("-", "").replace("+", ""))
-            direction = Filter.Direction.asc
-
-            if field_full_name.startswith("-"):
-                direction = Filter.Direction.desc
-
-            if hasattr(self.Constants.model, field_name) and \
-                    (self.Constants.prefix == prefix or prefix is None):
-
-                order_by_field = getattr(self.Constants.model, field_name)
-                query = query.order_by(getattr(order_by_field, direction)())
-            else:
-                for ordering_fields_name, _ in self.ordering_fields:
-                    field_value = getattr(self, ordering_fields_name)
-
-                    if isinstance(field_value, Filter):
-                        query = field_value.sort(query, [field_full_name])
-
-        return query
 
     @validator("*", pre=True)
     def split_str(cls, value, field):
@@ -207,9 +158,57 @@ class Filter(BaseModel, extra=Extra.forbid):
 
         return value
 
+    def filter(self, query: Union[orm.Query, Select], search_filters: List[BinaryExpression], search_value: str):
+        for field_name, value in self.filtering_fields:
+            field_value = getattr(self, field_name)
+            if isinstance(field_value, Filter):
+                query = field_value.filter(query, search_filters, search_value)
+            else:
+                if "__" in field_name:
+                    field_name, operator = field_name.split("__")
+                    operator, value = _orm_operator_transformer[operator](value)
+                else:
+                    operator = "__eq__"
+
+                model_field = getattr(self.Constants.model, field_name)
+                query = query.filter(getattr(model_field, operator)(value))
+
+        if hasattr(self.Constants, "search_model_fields") and search_value is not None:
+            search_filters.extend([
+                getattr(self.Constants.model, field).ilike(f"%{search_value}%")
+                for field in self.Constants.search_model_fields
+            ])
+
+        return query
+
+    def sort(self, query: Union[orm.Query, Select], ordering_fields: List[str]):
+        if len(ordering_fields) == 0:
+            return query
+
+        for field_full_name in ordering_fields:
+            prefix, field_name = Filter._split_prefix(field_full_name.replace("-", "").replace("+", ""))
+            direction = Filter.Direction.asc
+
+            if field_full_name.startswith("-"):
+                direction = Filter.Direction.desc
+
+            if hasattr(self.Constants.model, field_name) and \
+                    (self.Constants.prefix == prefix or prefix is None):
+
+                order_by_field = getattr(self.Constants.model, field_name)
+                query = query.order_by(getattr(order_by_field, direction)())
+            else:
+                for ordering_fields_name, _ in self.ordering_fields:
+                    field_value = getattr(self, ordering_fields_name)
+
+                    if isinstance(field_value, Filter):
+                        query = field_value.sort(query, [field_full_name])
+
+        return query
+
 
 def with_prefix(entry: Type[Filter]):
-    class NestedFilter(Filter):  # type: ignore[misc, valid-type]
+    class NestedFilter(entry):  # type: ignore[misc, valid-type]
         class Config:
             extra = Extra.forbid
 
@@ -217,7 +216,7 @@ def with_prefix(entry: Type[Filter]):
             def alias_generator(cls, string: str) -> str:
                 return f"{entry.Constants.prefix}__{string}"
 
-        class Constants(entry.Constants):
+        class Constants(entry.Constants):  # type: ignore[name-defined]
             ...
 
     return NestedFilter
@@ -232,7 +231,7 @@ def _list_to_str_fields(entry: Type[Filter], discard_ordering_field, discard_sea
                 (discard_search_field and entry.Constants.search_field_name == f.name):
             continue
 
-        if f.shape == py_fields.SHAPE_LIST:
+        if f.shape == py_field.SHAPE_LIST:
             if isinstance(field_info.default, Iterable):
                 field_info.default = ",".join(field_info.default)
 
@@ -245,8 +244,8 @@ def _list_to_str_fields(entry: Type[Filter], discard_ordering_field, discard_sea
     return ret
 
 
-def filter_depends(entry: Type[Filter], *, by_alias: bool = False, discard_ordering_field=False,
-                   discard_search_field=False) -> Any:
+def FilterDepends(entry: Type[Filter], *, by_alias: bool = False, discard_ordering_field=False,
+                  discard_search_field=False) -> Any:
     """Use a hack to support lists in filters.
 
     FastAPI doesn't support it yet: https://github.com/tiangolo/fastapi/issues/50
@@ -281,7 +280,10 @@ def filter_depends(entry: Type[Filter], *, by_alias: bool = False, discard_order
             except ValidationError as e:
                 raise RequestValidationError(e.raw_errors) from e
 
-            ordering_fields = "".join(getattr(self, entry.Constants.ordering_field_name).split()).split(',')
+            ordering_fields = []
+
+            if getattr(self, entry.Constants.ordering_field_name) is not None:
+                ordering_fields = "".join(getattr(self, entry.Constants.ordering_field_name).split()).split(',')
 
             return original_filter.sort(*args, ordering_fields, **kwargs)
 
