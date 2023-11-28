@@ -11,7 +11,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Mapped, declarative_base, relationship
 
-from src.sfp import FilterDepends, with_prefix, Filter
+from src.sfp import filter_depends, with_prefix, SortingFilteringPaging
 
 logger = logging.getLogger("uvicorn")
 
@@ -75,7 +75,7 @@ class UserOut(UserIn):
         orm_mode = True
 
 
-class AddressFilter(Filter):
+class AddressFilter(SortingFilteringPaging):
     street: Optional[str]
     country: Optional[str]
     city: Optional[str]
@@ -83,7 +83,7 @@ class AddressFilter(Filter):
     custom_order_by: Optional[List[str]]
     custom_search: Optional[str]
 
-    class Constants(Filter.Constants):
+    class Constants(SortingFilteringPaging.Constants):
         model = Address
         ordering_field_name = "custom_order_by"
         search_field_name = "custom_search"
@@ -91,13 +91,13 @@ class AddressFilter(Filter):
         prefix = 'address'
 
 
-class UserFilter(Filter):
+class UserFilter(SortingFilteringPaging):
     name: Optional[str]
     name__ilike: Optional[str]
     name__like: Optional[str]
     name__neq: Optional[str]
-    address: Optional[AddressFilter] = FilterDepends(with_prefix(AddressFilter), discard_ordering_field=True,
-                                                     discard_search_field=True)
+    address: Optional[AddressFilter] = filter_depends(with_prefix(AddressFilter), discard_searching=True,
+                                                      discard_ordering=True, discard_pagination=True)
     age__lt: Optional[int]
     age__gte: int = Field(Query(description="this is a nice description"))
     """Required field with a custom description.
@@ -107,7 +107,7 @@ class UserFilter(Filter):
     order_by: List[str] = ["age"]
     search: Optional[str]
 
-    class Constants(Filter.Constants):
+    class Constants(SortingFilteringPaging.Constants):
         model = User
         search_model_fields = ["name"]
 
@@ -147,10 +147,11 @@ async def get_db() -> AsyncIterator[AsyncSession]:
 
 @app.get("/users", response_model=List[UserOut])
 async def get_users(
-        user_filter: UserFilter = FilterDepends(UserFilter),
+        user_filter: UserFilter = filter_depends(UserFilter),
         db: AsyncSession = Depends(get_db),
 ) -> Any:
     query = select(User).join(Address)
+    query = user_filter.paginate(query)
     query = user_filter.filter(query)
     query = user_filter.sort(query)
     result = await db.execute(query)
@@ -159,7 +160,7 @@ async def get_users(
 
 @app.get("/addresses", response_model=List[AddressOut])
 async def get_addresses(
-        address_filter: AddressFilter = FilterDepends(AddressFilter, by_alias=True),
+        address_filter: AddressFilter = filter_depends(AddressFilter, by_alias=True),
         db: AsyncSession = Depends(get_db),
 ) -> Any:
     query = select(Address)

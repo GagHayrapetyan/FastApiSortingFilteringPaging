@@ -51,7 +51,10 @@ _orm_operator_transformer = {
 }
 
 
-class Filter(BaseModel, extra=Extra.forbid):
+class SortingFilteringPaging(BaseModel, extra=Extra.forbid):
+    page: int = 0
+    size: int = 100
+
     class Direction(str, Enum):
         asc = "asc"
         desc = "desc"
@@ -68,6 +71,8 @@ class Filter(BaseModel, extra=Extra.forbid):
         fields = self.dict(exclude_none=True, exclude_unset=True)
         fields.pop(self.Constants.ordering_field_name, None)
         fields.pop(self.Constants.search_field_name, None)
+        fields.pop('page')
+        fields.pop('size')
 
         return fields.items()
 
@@ -76,7 +81,7 @@ class Filter(BaseModel, extra=Extra.forbid):
         fields = self.dict(exclude_none=True, exclude_unset=True)
 
         for i in list(fields.keys()):
-            if not isinstance(getattr(self, i), Filter):
+            if not isinstance(getattr(self, i), SortingFilteringPaging):
                 fields.pop(i, None)
 
         return fields.items()
@@ -121,7 +126,7 @@ class Filter(BaseModel, extra=Extra.forbid):
         for key in fields_dict.keys():
             value = fields_dict.get(key)
 
-            if isinstance(value, Filter):
+            if isinstance(value, SortingFilteringPaging):
                 if (hasattr(value.Constants.model, field_name) and value.Constants.prefix == prefix) or \
                         cls._validate_order_by_field(ordering_field, dict(value)):
                     return True
@@ -161,7 +166,7 @@ class Filter(BaseModel, extra=Extra.forbid):
     def filter(self, query: Union[orm.Query, Select], search_filters: List[BinaryExpression], search_value: str):
         for field_name, value in self.filtering_fields:
             field_value = getattr(self, field_name)
-            if isinstance(field_value, Filter):
+            if isinstance(field_value, SortingFilteringPaging):
                 query = field_value.filter(query, search_filters, search_value)
             else:
                 if "__" in field_name:
@@ -186,11 +191,11 @@ class Filter(BaseModel, extra=Extra.forbid):
             return query
 
         for field_full_name in ordering_fields:
-            prefix, field_name = Filter._split_prefix(field_full_name.replace("-", "").replace("+", ""))
-            direction = Filter.Direction.asc
+            prefix, field_name = SortingFilteringPaging._split_prefix(field_full_name.replace("-", "").replace("+", ""))
+            direction = SortingFilteringPaging.Direction.asc
 
             if field_full_name.startswith("-"):
-                direction = Filter.Direction.desc
+                direction = SortingFilteringPaging.Direction.desc
 
             if hasattr(self.Constants.model, field_name) and \
                     (self.Constants.prefix == prefix or prefix is None):
@@ -201,13 +206,16 @@ class Filter(BaseModel, extra=Extra.forbid):
                 for ordering_fields_name, _ in self.ordering_fields:
                     field_value = getattr(self, ordering_fields_name)
 
-                    if isinstance(field_value, Filter):
+                    if isinstance(field_value, SortingFilteringPaging):
                         query = field_value.sort(query, [field_full_name])
 
         return query
 
+    def paginate(self, query: Union[orm.Query, Select]):
+        return query.offset(self.page * self.size).limit(self.size)
 
-def with_prefix(entry: Type[Filter]):
+
+def with_prefix(entry: Type[SortingFilteringPaging]):
     class NestedFilter(entry):  # type: ignore[misc, valid-type]
         class Config:
             extra = Extra.forbid
@@ -222,13 +230,14 @@ def with_prefix(entry: Type[Filter]):
     return NestedFilter
 
 
-def _list_to_str_fields(entry: Type[Filter], discard_ordering_field, discard_search_field):
+def _list_to_str_fields(entry: Type[SortingFilteringPaging], discard_ordering, discard_searching, discard_pagination):
     ret: Dict[str, Tuple[Union[object, Type], Optional[FieldInfo]]] = {}
     for f in entry.__fields__.values():
         field_info = deepcopy(f.field_info)
 
-        if (discard_ordering_field and entry.Constants.ordering_field_name == f.name) or \
-                (discard_search_field and entry.Constants.search_field_name == f.name):
+        if (discard_ordering and entry.Constants.ordering_field_name == f.name) or \
+                (discard_searching and entry.Constants.search_field_name == f.name) or \
+                (discard_pagination and f.name in ['page', 'size']):
             continue
 
         if f.shape == py_field.SHAPE_LIST:
@@ -244,20 +253,10 @@ def _list_to_str_fields(entry: Type[Filter], discard_ordering_field, discard_sea
     return ret
 
 
-def FilterDepends(entry: Type[Filter], *, by_alias: bool = False, discard_ordering_field=False,
-                  discard_search_field=False) -> Any:
-    """Use a hack to support lists in filters.
-
-    FastAPI doesn't support it yet: https://github.com/tiangolo/fastapi/issues/50
-
-    What we do is loop through the fields of a filter and change any `list` field to a `str` one so that it won't be
-    excluded from the possible query parameters.
-
-    When we apply the filter, we build the original filter to properly validate the data (i.e. can the string be parsed
-    and formatted as a list of <type>?)
-    """
-    fields = _list_to_str_fields(entry, discard_ordering_field, discard_search_field)
-    GeneratedFilter: Type[Filter] = create_model(entry.__class__.__name__, **fields)
+def filter_depends(entry: Type[SortingFilteringPaging], *, by_alias: bool = False, discard_ordering=False,
+                   discard_searching=False, discard_pagination=False) -> Any:
+    fields = _list_to_str_fields(entry, discard_ordering, discard_searching, discard_pagination)
+    GeneratedFilter: Type[SortingFilteringPaging] = create_model(entry.__class__.__name__, **fields)
 
     class FilterWrapper(GeneratedFilter):  # type: ignore[misc,valid-type]
         def filter(self, *args, **kwargs):
@@ -286,5 +285,13 @@ def FilterDepends(entry: Type[Filter], *, by_alias: bool = False, discard_orderi
                 ordering_fields = "".join(getattr(self, entry.Constants.ordering_field_name).split()).split(',')
 
             return original_filter.sort(*args, ordering_fields, **kwargs)
+
+        def paginate(self, *args, **kwargs):
+            try:
+                original_filter = entry(**self.dict(by_alias=by_alias))
+            except ValidationError as e:
+                raise RequestValidationError(e.raw_errors) from e
+
+            return original_filter.paginate(*args, **kwargs)
 
     return Depends(FilterWrapper)
