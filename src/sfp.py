@@ -86,6 +86,20 @@ class SortingFilteringPaging(BaseModel, extra=Extra.forbid):
 
         return fields.items()
 
+    @validator('page')
+    def page_validator(cls, value):
+        if value < 0:
+            raise ValueError('page must be greater than zero!')
+
+        return value
+
+    @validator('size')
+    def size_validator(cls, value):
+        if value < 1 or value > 100:
+            raise ValueError('size must be in the range [1, 100]!')
+
+        return value
+
     @validator("*", pre=True)
     def split_str(cls, value, field):
         if ((field.name == cls.Constants.ordering_field_name
