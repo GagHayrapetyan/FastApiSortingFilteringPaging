@@ -60,7 +60,7 @@ class SortingFilteringPaging(BaseModel, extra=Extra.forbid):
         desc = "desc"
 
     class Constants:  # pragma: no cover
-        model: Type
+        model: Type = None
         ordering_field_name: str = "order_by"
         search_model_fields: List[str]
         search_field_name: str = "search"
@@ -151,6 +151,9 @@ class SortingFilteringPaging(BaseModel, extra=Extra.forbid):
     def validate_order_by_field(cls, value, values, field):
         field_name_usages = defaultdict(list)
         duplicated_field_names = set()
+
+        if value is None:
+            return value
 
         for field_name_with_direction in value:
             field_name = field_name_with_direction.replace("-", "").replace("+", "")
