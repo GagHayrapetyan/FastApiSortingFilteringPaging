@@ -4,6 +4,7 @@ from copy import deepcopy
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
 from enum import Enum
 from warnings import warn
+from enum import IntEnum
 
 from fastapi import Depends, Query
 from fastapi.exceptions import RequestValidationError
@@ -105,7 +106,11 @@ class SortingFilteringPaging(BaseModel, extra=Extra.forbid):
         if ((field.name == cls.Constants.ordering_field_name
              or field.name.endswith("__in")
              or field.name.endswith("__not_in")) and isinstance(value, str)):
-            return [field.type_(v) for v in value.split(",")]
+            if issubclass(field.type_, IntEnum):
+                return [field.type_(int(v)) for v in value.split(",")]
+            else:
+                return [field.type_(v) for v in value.split(",")]
+
         return value
 
     @validator("*", pre=True, allow_reuse=True, check_fields=False)
